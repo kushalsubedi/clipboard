@@ -7,12 +7,16 @@ final class ClipboardStore: ObservableObject {
     @Published var sessions: [Session] = []
     @Published var currentSessionId: Int64
     @Published var searchText: String = ""
+    @Published var openOnHover: Bool {
+        didSet { defaults.set(openOnHover, forKey: openOnHoverKey) }
+    }
 
     private let db: Database
     private var pasteboardTimer: Timer?
     private var lastChangeCount: Int
     private let defaults = UserDefaults.standard
     private let currentSessionKey = "com.clipboardmini.currentSessionId"
+    private let openOnHoverKey = "com.clipboardmini.openOnHover"
 
     var filteredClips: [Clip] {
         guard !searchText.isEmpty else { return clips }
@@ -33,6 +37,7 @@ final class ClipboardStore: ObservableObject {
         let db = Database(path: dbPath)
         self.db = db
         self.lastChangeCount = NSPasteboard.general.changeCount
+        self.openOnHover = defaults.bool(forKey: openOnHoverKey)
 
         var loadedSessions = db.fetchSessions()
         if loadedSessions.isEmpty {
@@ -59,11 +64,66 @@ final class ClipboardStore: ObservableObject {
         let pb = NSPasteboard.general
         guard pb.changeCount != lastChangeCount else { return }
         lastChangeCount = pb.changeCount
-        guard let raw = pb.string(forType: .string) else { return }
-        let str = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !str.isEmpty, str != db.latestContent(sessionId: currentSessionId) else { return }
-        _ = db.insertClip(sessionId: currentSessionId, content: str)
+        guard let captured = capture(from: pb) else { return }
+        if let latest = db.latestClip(sessionId: currentSessionId),
+           latest.kind == captured.kind,
+           latest.content == captured.content,
+           latest.data == captured.data {
+            return // consecutive duplicate
+        }
+        _ = db.insertClip(sessionId: currentSessionId, kind: captured.kind,
+                          content: captured.content, data: captured.data)
         refreshClips()
+    }
+
+    /// Reads the richest supported representation off the pasteboard.
+    /// Priority: image → rich text → plain text.
+    private func capture(from pb: NSPasteboard) -> (kind: ClipKind, content: String, data: Data?)? {
+        let types = pb.types ?? []
+
+        // Images — but not file copies (Finder puts the file's icon on the pasteboard).
+        if !types.contains(.fileURL), let png = pngData(from: pb) {
+            let label: String
+            if let rep = NSBitmapImageRep(data: png) {
+                label = "Image \(rep.pixelsWide)×\(rep.pixelsHigh)"
+            } else {
+                label = "Image"
+            }
+            return (.image, label, png)
+        }
+
+        // Rich text — keep the RTF bytes, extract plain text for search/preview.
+        if let rtf = pb.data(forType: .rtf),
+           let plain = pb.string(forType: .string) ?? plainText(fromRTF: rtf) {
+            let trimmed = plain.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return (.rtf, trimmed, rtf)
+            }
+        }
+
+        // Plain text.
+        if let raw = pb.string(forType: .string) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return (.text, trimmed, nil)
+            }
+        }
+        return nil
+    }
+
+    private func pngData(from pb: NSPasteboard) -> Data? {
+        if let png = pb.data(forType: .png) {
+            return png
+        }
+        if let tiff = pb.data(forType: .tiff),
+           let rep = NSBitmapImageRep(data: tiff) {
+            return rep.representation(using: .png, properties: [:])
+        }
+        return nil
+    }
+
+    private func plainText(fromRTF data: Data) -> String? {
+        NSAttributedString(rtf: data, documentAttributes: nil)?.string
     }
 
     func refreshClips() {
@@ -74,10 +134,22 @@ final class ClipboardStore: ObservableObject {
         sessions = db.fetchSessions()
     }
 
-    func copyToClipboard(_ content: String) {
+    func copyToClipboard(_ clip: Clip) {
         let pb = NSPasteboard.general
         pb.clearContents()
-        pb.setString(content, forType: .string)
+        switch clip.kind {
+        case .text:
+            pb.setString(clip.content, forType: .string)
+        case .rtf:
+            if let data = clip.data {
+                pb.setData(data, forType: .rtf)
+            }
+            pb.setString(clip.content, forType: .string) // fallback for plain-text targets
+        case .image:
+            if let data = clip.data, let image = NSImage(data: data) {
+                pb.writeObjects([image])
+            }
+        }
         lastChangeCount = pb.changeCount // don't re-capture our own copy as a "new" clip
     }
 

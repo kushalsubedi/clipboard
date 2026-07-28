@@ -148,6 +148,17 @@ struct ContentView: View {
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
             Divider().frame(height: 12)
+            Menu {
+                Toggle("Open on Hover", isOn: $store.openOnHover)
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .foregroundStyle(.secondary)
+            .help("Settings")
+            Divider().frame(height: 12)
             Button {
                 NSApplication.shared.terminate(nil)
             } label: {

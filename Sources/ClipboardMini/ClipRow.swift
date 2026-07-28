@@ -19,6 +19,17 @@ struct ClipRow: View {
         clip.content.replacingOccurrences(of: "\n", with: " ")
     }
 
+    private var thumbnail: NSImage? {
+        guard clip.kind == .image, let data = clip.data else { return nil }
+        return NSImage(data: data)
+    }
+
+    private var richText: AttributedString? {
+        guard clip.kind == .rtf, let data = clip.data,
+              let attributed = NSAttributedString(rtf: data, documentAttributes: nil) else { return nil }
+        return AttributedString(attributed)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .top, spacing: 8) {
@@ -27,13 +38,18 @@ struct ClipRow: View {
                         .font(.caption2)
                         .foregroundStyle(.tint)
                 }
-                Text(isExpanded ? clip.content : preview)
-                    .font(.system(.callout, design: .monospaced))
-                    .lineLimit(isExpanded ? nil : 3)
+                clipContent
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Text(relativeTime)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(relativeTime)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    if clip.kind != .text {
+                        Image(systemName: clip.kind == .image ? "photo" : "textformat")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             if isExpanded {
@@ -57,9 +73,40 @@ struct ClipRow: View {
             onToggleExpand()
         }
         .contextMenu {
-            Button("Copy") { store.copyToClipboard(clip.content) }
+            Button("Copy") { store.copyToClipboard(clip) }
             Button(clip.pinned ? "Unpin" : "Pin") { store.togglePin(clip) }
             Button("Delete", role: .destructive) { store.deleteClip(clip) }
+        }
+    }
+
+    @ViewBuilder
+    private var clipContent: some View {
+        switch clip.kind {
+        case .image:
+            if let thumbnail {
+                Image(nsImage: thumbnail)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxHeight: isExpanded ? 260 : 56, alignment: .leading)
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+            } else {
+                Text(preview)
+                    .font(.system(.callout, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
+        case .rtf:
+            if isExpanded, let richText {
+                Text(richText)
+                    .textSelection(.enabled)
+            } else {
+                Text(preview)
+                    .font(.system(.callout, design: .rounded))
+                    .lineLimit(3)
+            }
+        case .text:
+            Text(isExpanded ? clip.content : preview)
+                .font(.system(.callout, design: .monospaced))
+                .lineLimit(isExpanded ? nil : 3)
         }
     }
 
@@ -88,11 +135,13 @@ struct ClipRow: View {
     private var actionRow: some View {
         HStack(spacing: 14) {
             actionButton("doc.on.doc", "Copy") {
-                store.copyToClipboard(clip.content)
+                store.copyToClipboard(clip)
             }
-            actionButton("pencil", "Edit") {
-                editedContent = clip.content
-                isEditing = true
+            if clip.kind == .text {
+                actionButton("pencil", "Edit") {
+                    editedContent = clip.content
+                    isEditing = true
+                }
             }
             actionButton(clip.pinned ? "pin.slash" : "pin", clip.pinned ? "Unpin" : "Pin") {
                 store.togglePin(clip)
