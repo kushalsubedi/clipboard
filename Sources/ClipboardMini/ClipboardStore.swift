@@ -93,7 +93,9 @@ final class ClipboardStore: ObservableObject {
         }
 
         // Rich text — keep the RTF bytes, extract plain text for search/preview.
-        if let rtf = pb.data(forType: .rtf),
+        // Browsers and many chat apps put HTML (not RTF) on the pasteboard,
+        // so fall back to converting their HTML into RTF.
+        if let rtf = pb.data(forType: .rtf) ?? rtfFromHTML(pb.data(forType: .html)),
            let plain = pb.string(forType: .string) ?? plainText(fromRTF: rtf) {
             let trimmed = plain.trimmingCharacters(in: .whitespacesAndNewlines)
             if !trimmed.isEmpty {
@@ -126,6 +128,22 @@ final class ClipboardStore: ObservableObject {
         NSAttributedString(rtf: data, documentAttributes: nil)?.string
     }
 
+    /// Converts pasteboard HTML into RTF so styled copies from browsers
+    /// survive as rich text. The WebKit-based HTML importer must run on the
+    /// main thread; the pasteboard timer already fires there.
+    private func rtfFromHTML(_ html: Data?) -> Data? {
+        guard let html, !html.isEmpty, html.count < 1_000_000,
+              let attributed = try? NSAttributedString(
+                  data: html,
+                  options: [.documentType: NSAttributedString.DocumentType.html,
+                            .characterEncoding: String.Encoding.utf8.rawValue],
+                  documentAttributes: nil),
+              attributed.length > 0 else { return nil }
+        return try? attributed.data(
+            from: NSRange(location: 0, length: attributed.length),
+            documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
+    }
+
     func refreshClips() {
         clips = db.fetchClips(sessionId: currentSessionId)
     }
@@ -151,6 +169,19 @@ final class ClipboardStore: ObservableObject {
             }
         }
         lastChangeCount = pb.changeCount // don't re-capture our own copy as a "new" clip
+    }
+
+    /// Puts a generated image (e.g. a QR code) on the pasteboard without
+    /// recording it as a new clip.
+    func copyGeneratedImage(_ png: Data) {
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        pb.setData(png, forType: .png)
+        if let image = NSImage(data: png),
+           let tiff = image.tiffRepresentation {
+            pb.setData(tiff, forType: .tiff)
+        }
+        lastChangeCount = pb.changeCount
     }
 
     func updateClip(_ clip: Clip, newContent: String) {

@@ -8,6 +8,7 @@ struct ClipRow: View {
 
     @State private var editedContent: String = ""
     @State private var isEditing = false
+    @State private var showQR = false
 
     private var relativeTime: String {
         let formatter = RelativeDateTimeFormatter()
@@ -27,7 +28,26 @@ struct ClipRow: View {
     private var richText: AttributedString? {
         guard clip.kind == .rtf, let data = clip.data,
               let attributed = NSAttributedString(rtf: data, documentAttributes: nil) else { return nil }
-        return AttributedString(attributed)
+        let adapted = NSMutableAttributedString(attributedString: attributed)
+        let fullRange = NSRange(location: 0, length: adapted.length)
+        adapted.enumerateAttribute(.foregroundColor, in: fullRange) { value, range, _ in
+            // RTF hardcodes the source app's text color (usually black, or white
+            // from dark-themed apps). Either extreme is invisible against one of
+            // the popover's appearances, so remap it to the adaptive label color.
+            // Genuinely colored text (e.g. syntax highlighting) is left alone.
+            guard let color = (value as? NSColor)?.usingColorSpace(.sRGB) else {
+                if value == nil {
+                    adapted.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+                }
+                return
+            }
+            let isGrayish = abs(color.redComponent - color.greenComponent) < 0.1
+                && abs(color.greenComponent - color.blueComponent) < 0.1
+            if isGrayish && (color.brightnessComponent < 0.3 || color.brightnessComponent > 0.8) {
+                adapted.addAttribute(.foregroundColor, value: NSColor.labelColor, range: range)
+            }
+        }
+        return AttributedString(adapted)
     }
 
     var body: some View {
@@ -68,12 +88,19 @@ struct ClipRow: View {
                 .stroke(isExpanded ? Color.accentColor.opacity(0.4) : .clear, lineWidth: 1)
         )
         .contentShape(Rectangle())
+        .popover(isPresented: $showQR, arrowEdge: .bottom) {
+            QRCodePopover(text: clip.content)
+                .environmentObject(store)
+        }
         .onTapGesture {
             isEditing = false
             onToggleExpand()
         }
         .contextMenu {
             Button("Copy") { store.copyToClipboard(clip) }
+            if clip.kind != .image {
+                Button("Show QR Code") { showQR = true }
+            }
             Button(clip.pinned ? "Unpin" : "Pin") { store.togglePin(clip) }
             Button("Delete", role: .destructive) { store.deleteClip(clip) }
         }
@@ -137,6 +164,11 @@ struct ClipRow: View {
             actionButton("doc.on.doc", "Copy") {
                 store.copyToClipboard(clip)
             }
+            if clip.kind != .image {
+                actionButton("qrcode", "QR Code") {
+                    showQR = true
+                }
+            }
             if clip.kind == .text {
                 actionButton("pencil", "Edit") {
                     editedContent = clip.content
@@ -163,5 +195,44 @@ struct ClipRow: View {
         .buttonStyle(.plain)
         .foregroundStyle(role == .destructive ? .red : .secondary)
         .help(label)
+    }
+}
+
+struct QRCodePopover: View {
+    @EnvironmentObject var store: ClipboardStore
+    let text: String
+    @State private var copied = false
+
+    var body: some View {
+        VStack(spacing: 10) {
+            if let qrImage = QRCode.image(for: text) {
+                Image(nsImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .frame(width: 180, height: 180)
+                    .padding(10) // quiet zone so scanners can lock on
+                    .background(Color.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+
+                Button {
+                    if let png = QRCode.pngData(for: text) {
+                        store.copyGeneratedImage(png)
+                        copied = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { copied = false }
+                    }
+                } label: {
+                    Label(copied ? "Copied" : "Copy QR Image",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                        .font(.caption)
+                }
+            } else {
+                Label("Too much text for a QR code (max \(QRCode.maxBytes) bytes)",
+                      systemImage: "exclamationmark.triangle")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 180)
+            }
+        }
+        .padding(14)
     }
 }
